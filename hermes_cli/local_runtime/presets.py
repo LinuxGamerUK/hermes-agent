@@ -91,8 +91,24 @@ def preset_for_model(gguf: Path, budget: HardwareBudget,
         return None
     entry = entry_for_model(model_id)
     is_mtp = entry.mtp if entry is not None else model_id in mtp_capable
+    # Guard (2026-09-27, Browett Legion): standalone community GGUFs of MTP-capable
+    # architectures (e.g. unsloth/Qwen3.6-35B-A3B) ship WITHOUT embedded MTP layers;
+    # requesting spec-type=draft-mtp against them makes the router child exit on load
+    # ("context type MTP requested but model doesn't contain MTP layers"). Only trust
+    # the catalog's mtp flag when the file's own metadata corroborates it.
+    if is_mtp and entry is not None:
+        _meta = (header.metadata or {})
+        if not any("mtp" in str(k).lower() for k in _meta):
+            is_mtp = False
 
     mmproj_path = _asset_path(entry.mmproj) if entry is not None else None
+    # Guard: the BF16 vision projector (≈0.9 GB) aborts llama.cpp's clip loader on
+    # budgets where weights already spill (12 GB card, 2026-09-27). Vision is optional
+    # — never let it kill a text-only launch posture on a small card.
+    if mmproj_path is not None and entry is not None and not budget.uma \
+            and entry.mmproj is not None and entry.mmproj.size_bytes > 200_000_000 and \
+            profile.weights_bytes + entry.mmproj.size_bytes > budget.usable_vram_bytes:
+        mmproj_path = None
     fixed_overhead = RUNTIME_OVERHEAD_BYTES + (
         entry.mmproj.size_bytes if entry is not None and mmproj_path is not None else 0)
     plan = plan_launch(profile, budget, mtp_capable=is_mtp, fixed_overhead=fixed_overhead,
